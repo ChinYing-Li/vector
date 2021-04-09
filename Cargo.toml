@@ -243,6 +243,7 @@ uuid = { version = "0.8.2", default-features = false, features = ["serde", "v4"]
 warp = { version = "0.3.1", default-features = false, optional = true }
 zstd = { version = "0.6", default-features = false }
 cfg-if = { version = "1.0.0", default-features = false }
+tonic = { version = "0.4", optional = true }
 
 # For WASM
 async-stream = "0.3.1"
@@ -264,6 +265,7 @@ nix = "0.20.0"
 
 [build-dependencies]
 prost-build = "0.7.0"
+tonic-build = { version = "0.4", features = ["transport"], optional = true }
 built = { version = "0.4.4", features = ["chrono", "git2"] }
 
 [dev-dependencies]
@@ -371,6 +373,7 @@ sources-logs = [
   "sources-stdin",
   "sources-syslog",
   "sources-vector",
+  "sources-vector_grpc",
 ]
 sources-metrics = [
   "sources-apache_metrics",
@@ -383,6 +386,7 @@ sources-metrics = [
   "sources-prometheus",
   "sources-statsd",
   "sources-vector",
+  "sources-vector_grpc",
 ]
 
 sources-apache_metrics = []
@@ -417,6 +421,7 @@ sources-utils-tls = []
 sources-utils-udp = []
 sources-utils-unix = []
 sources-vector = ["listenfd", "sources-utils-tcp-keepalive", "sources-utils-tcp-socket", "sources-utils-tls"]
+sources-vector_grpc = ["tonic", "tonic-build"]
 
 # Transforms
 transforms = ["transforms-logs", "transforms-metrics"]
@@ -522,7 +527,8 @@ sinks-logs = [
   "sinks-sematext",
   "sinks-socket",
   "sinks-splunk_hec",
-  "sinks-vector"
+  "sinks-vector",
+  "sinks-vector_grpc",
 ]
 sinks-metrics = [
   "sinks-aws_cloudwatch_metrics",
@@ -535,7 +541,8 @@ sinks-metrics = [
   "sinks-prometheus",
   "sinks-sematext",
   "sinks-statsd",
-  "sinks-vector"
+  "sinks-vector",
+  "sinks-vector_grpc",
 ]
 
 sinks-aws_cloudwatch_logs = ["rusoto", "rusoto_logs"]
@@ -570,6 +577,7 @@ sinks-splunk_hec = ["bytesize"]
 sinks-statsd = ["sinks-utils-udp", "tokio-util/net"]
 sinks-utils-udp = []
 sinks-vector = ["sinks-utils-udp"]
+sinks-vector_grpc = ["tonic", "tonic-build", "warp", "sources-utils-tls", "listenfd", "sources-utils-tcp-socket", "sources-utils-tcp-keepalive"]
 
 # Identifies that the build is a nightly build
 nightly = []

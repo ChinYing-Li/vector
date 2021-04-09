@@ -53,6 +53,8 @@ pub mod stdin;
 pub mod syslog;
 #[cfg(feature = "sources-vector")]
 pub mod vector;
+#[cfg(feature = "sources-vector_grpc")]
+pub mod vector_grpc;
 
 mod util;
 

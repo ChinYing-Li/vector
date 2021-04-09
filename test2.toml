@@ -1,0 +1,9 @@
+[sources.dummy]
+type = "generator"
+format = "syslog"
+interval = 5
+
+[sinks.grpc]
+type = "vector_grpc"
+inputs = ["dummy"]
+address = "http://127.0.0.1:6000"

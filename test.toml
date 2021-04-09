@@ -1,0 +1,25 @@
+# [sources.dummy_logs]
+# type = "generator"
+# format = "syslog"
+# interval = 5
+
+[sources.grpc]
+type = "vector_grpc"
+address = "127.0.0.1:6000"
+
+[transforms.parse]
+type = "remap"
+inputs = ["grpc"]
+source = '''
+. = parse_syslog!(.message)
+'''
+
+[sinks.print]
+type = "console"
+inputs = ["parse"]
+encoding.codec = "json"
+
+# [sinks.grpc_sink]
+# type = "vector_grpc"
+# inputs = ["parse_logs"]
+# address = "http://127.0.0.1:6000"
