@@ -251,6 +251,7 @@ lucet-runtime = { git = "https://github.com/bytecodealliance/lucet.git", rev = "
 lucet-wasi = { git = "https://github.com/bytecodealliance/lucet.git", rev = "b1863dacc8c92c11e5434fc8815d9b9a26cfe3db", optional = true }
 lucetc = { git = "https://github.com/bytecodealliance/lucet.git", rev = "b1863dacc8c92c11e5434fc8815d9b9a26cfe3db", optional = true }
 vector-wasm = { path = "lib/vector-wasm", optional = true }
+# tonic-health = "0.3.0"
 
 [target.'cfg(windows)'.dependencies]
 schannel = "0.1.19"
@@ -577,7 +578,7 @@ sinks-splunk_hec = ["bytesize"]
 sinks-statsd = ["sinks-utils-udp", "tokio-util/net"]
 sinks-utils-udp = []
 sinks-vector = ["sinks-utils-udp"]
-sinks-vector_grpc = ["tonic", "tonic-build", "warp", "sources-utils-tls", "listenfd", "sources-utils-tcp-socket", "sources-utils-tcp-keepalive"]
+sinks-vector_grpc = ["tonic", "tonic-build"]
 
 # Identifies that the build is a nightly build
 nightly = []

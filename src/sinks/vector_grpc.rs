@@ -4,37 +4,50 @@ use crate::{
     event::Event,
     sinks::{Healthcheck, Sink, VectorSink},
 };
-use futures::Future;
+use futures::{Future, FutureExt};
 use getset::Setters;
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use tonic::{
+    client::GrpcService,
+    transport::{Channel, Endpoint},
+};
 
 // TODO: duplicated for sink/source, should move to util.
 mod proto {
+    use tonic::include_proto;
     pub use vector_client::VectorClient as Client;
 
-    tonic::include_proto!("vector");
+    include_proto!("vector");
 }
 
 #[derive(Deserialize, Serialize, Debug, Setters)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+pub struct VectorConfig {
     address: String,
+    // TODO
+    // #[serde(default)]
+    // pub compression: Compression,
+    // pub encoding: EncodingConfig<Encoding>,
+    // #[serde(default)]
+    // pub batch: BatchConfig,
+    // #[serde(default)]
+    // pub request: RequestConfig,
+    // pub tls: Option<TlsOptions>,
 }
 
-impl Config {
+impl VectorConfig {
     pub fn new(address: String) -> Self {
         Self { address }
     }
 }
 
 inventory::submit! {
-    SinkDescription::new::<Config>("vector_grpc")
+    SinkDescription::new::<VectorConfig>("vector_grpc")
 }
 
-impl GenerateConfig for Config {
+impl GenerateConfig for VectorConfig {
     fn generate_config() -> toml::Value {
         toml::Value::try_from(Self::new("127.0.0.1:6000".to_string())).unwrap()
     }
@@ -42,28 +55,19 @@ impl GenerateConfig for Config {
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "vector_grpc")]
-impl SinkConfig for Config {
+impl SinkConfig for VectorConfig {
     async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
-        let endpoint = tonic::transport::Endpoint::try_from(self.address.to_owned()).expect("TODO");
-        let client = proto::Client::connect(endpoint).await.expect("TODO");
+        let endpoint = Endpoint::from_shared(self.address.clone()).expect("TODO");
+        let channel = endpoint.connect_lazy().expect("TODO");
         let sink = GrpcSink {
-            client,
-            request: None,
+            channel,
+            future: None,
         };
 
-        Ok((
-            VectorSink::Sink(Box::new(sink)),
-            Box::pin(async move { Ok(()) }),
-        ))
+        // TODO
+        let healthcheck = async move { Ok(()) };
 
-        // let sink_config = TcpSinkConfig::new(
-        //     self.address.clone(),
-        //     self.keepalive,
-        //     self.tls.clone(),
-        //     self.send_buffer_bytes,
-        // );
-
-        // sink_config.build(cx, |event| Some(encode_event(event)))
+        Ok((VectorSink::Sink(Box::new(sink)), Box::pin(healthcheck)))
     }
 
     fn input_type(&self) -> DataType {
@@ -76,13 +80,11 @@ impl SinkConfig for Config {
 }
 
 struct GrpcSink {
-    client: proto::Client<tonic::transport::Channel>,
-    request: Option<
+    channel: Channel,
+    future: Option<
         Pin<
             Box<
-                dyn Future<Output = Result<tonic::Response<proto::EventAck>, tonic::Status>>
-                    + Send
-                    + 'static,
+                dyn Future<Output = Result<tonic::Response<proto::EventAck>, tonic::Status>> + Send,
             >,
         >,
     >,
@@ -92,31 +94,40 @@ impl Sink<Event> for GrpcSink {
     type Error = ();
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+        if self.future.is_some() {
+            return Poll::Pending;
+        }
+
+        self.channel.poll_ready(cx).map_err(|_| ())
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Event) -> Result<(), Self::Error> {
-        let request = proto::EventRequest {
-            message: Some(item.into()),
-        };
+        let channel = self.channel.clone();
+        let future = Box::pin(async move {
+            let mut client = proto::Client::new(channel);
+            let request = proto::EventRequest {
+                message: Some(item.into()),
+            };
 
-        // let client = self.client.clone();
-        // let response = self.client.clone().push_events(request);
+            client.push_events(request).await
+        });
 
-        self.request = Some(Box::pin(
-            async move { self.client.push_events(request).await },
-        ));
-
-        // async move {
-        //     self.request = Some(Box::pin(response));
-        // };
+        self.future = Some(future);
 
         Ok(())
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // TODO
-        // self.client.push_events(request);
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self.future.take() {
+            Some(mut fut) => match fut.poll_unpin(cx) {
+                Poll::Pending => {
+                    self.future.replace(fut);
+                    return Poll::Pending;
+                }
+                _ => {}
+            },
+            None => {}
+        };
 
         Poll::Ready(Ok(()))
     }

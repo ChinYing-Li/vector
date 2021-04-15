@@ -9,7 +9,7 @@ use crate::{
     Pipeline,
 };
 
-use futures::{FutureExt, TryFutureExt};
+use futures::{FutureExt, SinkExt, TryFutureExt};
 use getset::Setters;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -33,25 +33,28 @@ impl proto::Vector for Service {
         &self,
         request: Request<proto::EventRequest>,
     ) -> Result<Response<proto::EventAck>, Status> {
-        println!("GetEvents = {:?}", request);
-
         let event: Event = match request.into_inner().message {
             None => panic!("TODO"),
             Some(wrapper) => wrapper.into(),
         };
 
-        dbg!(event);
+        let result = self.pipeline.clone().send(event).await;
 
-        let status = Status::invalid_argument("name is invalid");
-        Err(status)
+        match result {
+            Ok(..) => Ok(Response::new(proto::EventAck {
+                message: "success".to_owned(),
+            })),
+            Err(err) => Err(Status::unavailable(err.to_string())),
+        }
+    }
 
-        // let reply = vector_proto::EventAck {
-        //     message: "nonsense".to_owned(),
-        // };
-        // // Get event from request
-        // // event_from_req(request.body)
-        // // Then send event to pipeline
-        // self.out.send() //'send' `Event`
+    async fn health_check(
+        &self,
+        _: Request<proto::HealthCheckRequest>,
+    ) -> Result<Response<proto::HealthCheckResponse>, Status> {
+        Ok(Response::new(proto::HealthCheckResponse {
+            status: proto::ServingStatus::Serving.into(),
+        }))
     }
 }
 
@@ -112,10 +115,16 @@ impl SourceConfig for Config {
 
 async fn run(address: SocketAddr, out: Pipeline, shutdown: ShutdownSignal) -> crate::Result<()> {
     let _span = crate::trace::current_span();
+
+    // let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    // health_reporter
+    //     .set_serving::<GreeterServer<MyGreeter>>()
+    //     .await;
     let service = proto::Server::new(Service { pipeline: out });
 
     let (tx, rx) = tokio::sync::oneshot::channel::<ShutdownSignalToken>();
     Server::builder()
+        // .add_service(health_service)
         .add_service(service)
         .serve_with_shutdown(address, shutdown.map(|token| tx.send(token).unwrap()))
         .await?;

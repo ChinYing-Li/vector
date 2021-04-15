@@ -15,6 +15,20 @@ message EventAck {
   string message = 1;
 }
 
+enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  ServingStatus status = 1;
+}
+
 service Vector {
   rpc PushEvents(EventRequest) returns (EventAck) {}
+
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
