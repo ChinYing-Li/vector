@@ -7,10 +7,6 @@ message EventRequest {
   event.EventWrapper message = 1;
 }
 
-message EventResponse {
-  event.EventWrapper message = 1;
-}
-
 message EventAck {
   string message = 1;
 }
