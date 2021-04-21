@@ -1,19 +1,25 @@
-use crate::sinks::util::{BatchConfig, BatchSettings, BatchSink, EncodedLength, VecBuffer};
 use crate::{
     config::{DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
     event::proto as event,
-    sinks::{util::sink, Healthcheck, VectorSink},
     event::Event,
+    sinks::util::{
+        retries::RetryLogic, sink, BatchConfig, BatchSettings, BatchSink, EncodedLength,
+        TowerRequestConfig, VecBuffer,
+    },
+    sinks::{Healthcheck, VectorSink},
 };
 use futures::{
     future::{self, BoxFuture},
     stream, SinkExt, StreamExt, TryFutureExt,
 };
 use getset::Setters;
+use lazy_static::lazy_static;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 use std::task::{Context, Poll};
 use tonic::{transport::Endpoint, IntoRequest};
+use tower::ServiceBuilder;
 
 // TODO: duplicated for sink/source, should move to util.
 mod proto {
@@ -29,57 +35,63 @@ type Response = Result<tonic::Response<proto::EventAck>, tonic::Status>;
 
 #[derive(Deserialize, Serialize, Debug, Setters)]
 #[serde(deny_unknown_fields)]
-pub struct VectorConfig {
+pub struct VectorSinkConfig {
     address: String,
-    // TODO
     #[serde(default)]
     pub batch: BatchConfig,
-    // #[serde(default)]
-    // pub request: RequestConfig,
-    // pub tls: Option<TlsOptions>,
-}
-
-impl VectorConfig {
-    pub fn new(address: String) -> Self {
-        Self {
-            address,
-            batch: BatchConfig::default(),
-        }
-    }
+    #[serde(default)]
+    pub request: TowerRequestConfig<Option<usize>>,
 }
 
 inventory::submit! {
-    SinkDescription::new::<VectorConfig>("vector_grpc")
+    SinkDescription::new::<VectorSinkConfig>("vector_grpc")
 }
 
-impl GenerateConfig for VectorConfig {
+impl GenerateConfig for VectorSinkConfig {
     fn generate_config() -> toml::Value {
-        toml::Value::try_from(Self::new("127.0.0.1:6000".to_string())).unwrap()
+        toml::Value::try_from(default_config("127.0.0.1:6000")).unwrap()
     }
+}
+
+fn default_config(address: &str) -> VectorSinkConfig {
+    VectorSinkConfig {
+        address: address.to_owned(),
+        batch: BatchConfig::default(),
+        request: TowerRequestConfig::default(),
+    }
+}
+
+lazy_static! {
+    static ref REQUEST_DEFAULTS: TowerRequestConfig<Option<usize>> = TowerRequestConfig {
+        ..Default::default()
+    };
 }
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "vector_grpc")]
-impl SinkConfig for VectorConfig {
+impl SinkConfig for VectorSinkConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let endpoint = Endpoint::from_shared(self.address.clone()).expect("TODO");
         let channel = endpoint.connect_lazy().expect("TODO");
-        let client = proto::Client::new(channel);
-
         let batch = BatchSettings::default()
             .bytes(1300)
             .events(1000)
             .timeout(1)
             .parse_config(self.batch)?;
+        let request = self.request.unwrap_with(&REQUEST_DEFAULTS);
 
-        let sink = BatchSink::new(
-            client,
-            VecBuffer::new(batch.size),
-            batch.timeout,
-            cx.acker(),
-        )
-        .sink_map_err(|error| error!(message = "Fatal GRPC sink error.", %error))
-        .with_flat_map(move |event| stream::iter(encode_event(event)).map(Ok));
+        let client = proto::Client::new(channel);
+        let svc = ServiceBuilder::new()
+            .concurrency_limit(request.concurrency.unwrap())
+            // .retry(request.retry_policy(VectorGrpcRetryLogic))
+            // .rate_limit(request.rate_limit_num, request.rate_limit_duration)
+            // .timeout(request.timeout)
+            .service(client);
+
+        let buffer = VecBuffer::new(batch.size);
+        let sink = BatchSink::new(svc, buffer, batch.timeout, cx.acker())
+            .sink_map_err(|error| error!(message = "Fatal grpc sink error.", %error))
+            .with_flat_map(move |event| stream::iter(encode_event(event)).map(Ok));
 
         // TODO
         let healthcheck = async move { Ok(()) };
@@ -148,5 +160,21 @@ impl tower::Service<Vec<Request>> for Client {
 impl sink::Response for Response {
     fn is_successful(&self) -> bool {
         self.is_ok()
+    }
+}
+
+#[derive(Debug, Snafu)]
+pub enum Error {}
+
+#[derive(Debug, Clone)]
+struct VectorGrpcRetryLogic;
+
+impl RetryLogic for VectorGrpcRetryLogic {
+    type Error = Error;
+    type Response = ();
+
+    fn is_retriable_error(&self, _: &Self::Error) -> bool {
+        // TODO
+        true
     }
 }
