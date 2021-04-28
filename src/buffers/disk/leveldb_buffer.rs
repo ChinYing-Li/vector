@@ -30,6 +30,9 @@ use crate::buffers::Acker;
 /// <0,1>
 const MAX_UNCOMPACTED: f64 = 0.1;
 
+/// How many bytes need to be deleted before we can trigger early compaction.
+const MIN_UNCOMPACTED_SIZE: usize = 1024 * 1024;
+
 #[derive(Copy, Clone, Debug)]
 struct Key(pub usize);
 
@@ -302,10 +305,13 @@ impl Reader {
             self.delete_offset = new_offset;
 
             let size_deleted = self.unacked_sizes.drain(..num_to_delete).sum();
-            self.current_size.fetch_sub(size_deleted, Ordering::Release);
+            let unread_size = self.current_size.fetch_sub(size_deleted, Ordering::Release);
 
             self.uncompacted_size += size_deleted;
-            if self.uncompacted_size > self.max_uncompacted_size {
+            if self.uncompacted_size > self.max_uncompacted_size
+                || (self.uncompacted_size > unread_size
+                    && self.uncompacted_size >= MIN_UNCOMPACTED_SIZE)
+            {
                 self.compact();
             }
         }
