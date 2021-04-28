@@ -13,6 +13,7 @@ pub mod util;
 mod log_event;
 mod lookup;
 mod value;
+mod vrl_target;
 
 pub use log_event::LogEvent;
 pub use lookup::Lookup;
@@ -22,6 +23,7 @@ use std::convert::{TryFrom, TryInto};
 pub(crate) use util::log::PathComponent;
 pub(crate) use util::log::PathIter;
 pub use value::Value;
+pub use vrl_target::VrlTarget;
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/event.proto.rs"));
