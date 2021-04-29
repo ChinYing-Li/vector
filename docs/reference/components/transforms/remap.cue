@@ -138,6 +138,18 @@ components: transforms: "remap": {
 				reference](\#(urls.vrl_runtime_errors)).
 				"""#
 		}
+		emitting_multiple_events: {
+			title: "Emitting multiple log events"
+			body: #"""
+				Multiple log events can be emitted from remap by setting the
+				root path, `.` to an array. One log event will be emitted for
+				each input array element.
+
+				If any of the array elements are not an object, they will be set
+				as the set as the `message` key for the corresponding emitted
+				log event.
+				"""#
+		}
 	}
 
 	telemetry: metrics: {
