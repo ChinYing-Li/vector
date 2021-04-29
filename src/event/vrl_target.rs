@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, convert::TryFrom, iter::FromIterator};
 
 const VALID_METRIC_PATHS_SET: &str = ".name, .namespace, .timestamp, .kind, .tags";
 
-/// We can get the `type` of the metric in Remap, but can't set  it.
+/// We can get the `type` of the metric in Remap, but can't set it.
 const VALID_METRIC_PATHS_GET: &str = ".name, .namespace, .timestamp, .kind, .tags, .type";
 
 /// Metrics aren't interested in paths that have a length longer than 3
@@ -14,7 +14,7 @@ const VALID_METRIC_PATHS_GET: &str = ".name, .namespace, .timestamp, .kind, .tag
 /// fields such as `.tags.host.thing`.
 const MAX_METRIC_PATH_DEPTH: usize = 3;
 
-/// An adapter to turn `Event`s into `vr::Target`s
+/// An adapter to turn `Event`s into `vrl::Target`s.
 #[derive(Debug, Clone)]
 pub enum VrlTarget {
     LogEvent(vrl::Value, EventMetadata),
@@ -34,10 +34,10 @@ impl VrlTarget {
         }
     }
 
-    /// Turn the target back into events
+    /// Turn the target back into events.
     ///
-    /// This returns an iterator of events as one event can be turned into multiple by assign `.`
-    /// to an array in VRL
+    /// This returns an iterator of events as one event can be turned into multiple by assigning an
+    /// array to `.` in VRL.
     pub fn into_events(self) -> impl Iterator<Item = Event> {
         match self {
             VrlTarget::LogEvent(value, metadata) => {
