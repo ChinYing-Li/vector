@@ -8,6 +8,7 @@ const VALID_METRIC_PATHS_SET: &str = ".name, .namespace, .timestamp, .kind, .tag
 /// We can get the `type` of the metric in Remap, but can't set  it.
 const VALID_METRIC_PATHS_GET: &str = ".name, .namespace, .timestamp, .kind, .tags, .type";
 
+/// An adapter to turn `Event`s into `vr::Target`s
 #[derive(Debug, Clone)]
 pub enum VrlTarget {
     LogEvent(vrl::Value),
@@ -15,6 +16,24 @@ pub enum VrlTarget {
 }
 
 impl VrlTarget {
+    pub fn new(event: Event) -> Self {
+        match event {
+            // TODO optimize
+            Event::Log(mut event) => VrlTarget::LogEvent(vrl::Value::Object(
+                event
+                    .take_fields()
+                    .into_iter()
+                    .map(|(key, value)| (key, value.into()))
+                    .collect(),
+            )),
+            Event::Metric(event) => VrlTarget::Metric(event),
+        }
+    }
+
+    /// Turn the target back into events
+    ///
+    /// This returns an iterator of events as one event can be turned into multiple by assign `.`
+    /// to an array in VRL
     pub fn into_events(self) -> impl Iterator<Item = Event> {
         match self {
             VrlTarget::LogEvent(value) => {
@@ -189,19 +208,10 @@ impl vrl::Target for VrlTarget {
         }
     }
 }
+
 impl From<Event> for VrlTarget {
     fn from(event: Event) -> Self {
-        match event {
-            // TODO optimize
-            Event::Log(mut event) => VrlTarget::LogEvent(vrl::Value::Object(
-                event
-                    .take_fields()
-                    .into_iter()
-                    .map(|(key, value)| (key, value.into()))
-                    .collect(),
-            )),
-            Event::Metric(event) => VrlTarget::Metric(event),
-        }
+        VrlTarget::new(event)
     }
 }
 
@@ -239,5 +249,150 @@ enum MetricPathError<'a> {
 
 #[cfg(test)]
 mod test {
-    // TODO put metric tests back here
+    use super::super::{metric::MetricTags, MetricValue};
+    use super::*;
+    use chrono::{offset::TimeZone, Utc};
+    use pretty_assertions::assert_eq;
+    use shared::btreemap;
+    use std::str::FromStr;
+    use vrl::{Path, Target, Value};
+
+    #[test]
+    fn metric_all_fields() {
+        let metric = Metric::new(
+            "zub",
+            MetricKind::Absolute,
+            MetricValue::Counter { value: 1.23 },
+        )
+        .with_namespace(Some("zoob"))
+        .with_tags(Some({
+            let mut map = MetricTags::new();
+            map.insert("tig".to_string(), "tog".to_string());
+            map
+        }))
+        .with_timestamp(Some(Utc.ymd(2020, 12, 10).and_hms(12, 0, 0)));
+
+        let target = VrlTarget::new(Event::Metric(metric));
+
+        assert_eq!(
+            Ok(Some(
+                btreemap! {
+                    "name" => "zub",
+                    "namespace" => "zoob",
+                    "timestamp" => Utc.ymd(2020, 12, 10).and_hms(12, 0, 0),
+                    "tags" => btreemap! { "tig" => "tog" },
+                    "kind" => "absolute",
+                    "type" => "counter",
+                }
+                .into()
+            )),
+            target.get(&Path::from_str(".").unwrap())
+        );
+    }
+
+    #[test]
+    fn metric_fields() {
+        let metric = Metric::new(
+            "name",
+            MetricKind::Absolute,
+            MetricValue::Counter { value: 1.23 },
+        )
+        .with_tags(Some({
+            let mut map = MetricTags::new();
+            map.insert("tig".to_string(), "tog".to_string());
+            map
+        }));
+
+        let cases = vec![
+            (
+                "name",                    // Path
+                Some(Value::from("name")), // Current value
+                Value::from("namefoo"),    // New value
+                false,                     // Test deletion
+            ),
+            ("namespace", None, "namespacefoo".into(), true),
+            (
+                "timestamp",
+                None,
+                Utc.ymd(2020, 12, 8).and_hms(12, 0, 0).into(),
+                true,
+            ),
+            (
+                "kind",
+                Some(Value::from("absolute")),
+                "incremental".into(),
+                false,
+            ),
+            ("tags.thing", None, "footag".into(), true),
+        ];
+
+        let mut target = VrlTarget::new(Event::Metric(metric));
+
+        for (path, current, new, delete) in cases {
+            let path = Path::from_str(path).unwrap();
+
+            assert_eq!(Ok(current), target.get(&path));
+            assert_eq!(Ok(()), target.insert(&path, new.clone()));
+            assert_eq!(Ok(Some(new.clone())), target.get(&path));
+
+            if delete {
+                assert_eq!(Ok(Some(new)), target.remove(&path, true));
+                assert_eq!(Ok(None), target.get(&path));
+            }
+        }
+    }
+
+    #[test]
+    fn metric_invalid_paths() {
+        let metric = Metric::new(
+            "name",
+            MetricKind::Absolute,
+            MetricValue::Counter { value: 1.23 },
+        );
+
+        let validpaths_get = vec![
+            ".name",
+            ".namespace",
+            ".timestamp",
+            ".kind",
+            ".tags",
+            ".type",
+        ];
+
+        let validpaths_set = vec![".name", ".namespace", ".timestamp", ".kind", ".tags"];
+
+        let mut target = VrlTarget::new(Event::Metric(metric));
+
+        assert_eq!(
+            Err(format!(
+                "invalid path .zork: expected one of {}",
+                validpaths_get.join(", ")
+            )),
+            target.get(&Path::from_str("zork").unwrap())
+        );
+
+        assert_eq!(
+            Err(format!(
+                "invalid path .zork: expected one of {}",
+                validpaths_set.join(", ")
+            )),
+            target.insert(&Path::from_str("zork").unwrap(), "thing".into())
+        );
+
+        assert_eq!(
+            Err(format!(
+                "invalid path .zork: expected one of {}",
+                validpaths_set.join(", ")
+            )),
+            target.remove(&Path::from_str("zork").unwrap(), true)
+        );
+
+        assert_eq!(
+            Err(format!(
+                "invalid path .tags.foo.flork: expected one of {}",
+                validpaths_get.join(", ")
+            )),
+            target.get(&Path::from_str("tags.foo.flork").unwrap())
+        );
+    }
 }
