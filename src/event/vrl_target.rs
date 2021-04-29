@@ -18,14 +18,11 @@ pub enum VrlTarget {
 impl VrlTarget {
     pub fn new(event: Event) -> Self {
         match event {
-            // TODO optimize
-            Event::Log(mut event) => VrlTarget::LogEvent(vrl::Value::Object(
-                event
-                    .take_fields()
-                    .into_iter()
-                    .map(|(key, value)| (key, value.into()))
-                    .collect(),
-            )),
+            Event::Log(event) => {
+                let fields: BTreeMap<String, Value> = event.into();
+                let value: Value = fields.into();
+                VrlTarget::LogEvent(value.into())
+            }
             Event::Metric(event) => VrlTarget::Metric(event),
         }
     }
@@ -37,7 +34,7 @@ impl VrlTarget {
     pub fn into_events(self) -> impl Iterator<Item = Event> {
         match self {
             VrlTarget::LogEvent(value) => {
-                Box::new(value_into_events(value)) as Box<dyn Iterator<Item = Event>>
+                Box::new(value_into_events(value.into())) as Box<dyn Iterator<Item = Event>>
             }
             VrlTarget::Metric(metric) => {
                 Box::new(std::iter::once(Event::Metric(metric))) as Box<dyn Iterator<Item = Event>>
@@ -215,26 +212,18 @@ impl From<Event> for VrlTarget {
     }
 }
 
-fn value_into_events(value: vrl::Value) -> impl Iterator<Item = Event> {
+fn value_into_events(value: Value) -> impl Iterator<Item = Event> {
     match value {
-        vrl::Value::Array(values) => Box::new(values.into_iter().map(value_into_events).flatten())
+        Value::Array(values) => Box::new(values.into_iter().map(value_into_events).flatten())
             as Box<dyn Iterator<Item = Event>>,
-        vrl::Value::Object(object) => {
-            // TODO optimize
-            let event = object
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect::<BTreeMap<String, Value>>()
-                .into();
-
-            Box::new(std::iter::once(event)) as Box<dyn Iterator<Item = Event>>
+        Value::Map(object) => {
+            Box::new(std::iter::once(Event::from(object))) as Box<dyn Iterator<Item = Event>>
         }
-        vrl::Value::Bytes(bytes) => {
+        Value::Bytes(bytes) => {
             Box::new(std::iter::once(Event::from(bytes))) as Box<dyn Iterator<Item = Event>>
         }
-        v => {
-            Box::new(std::iter::once(Event::from(v.to_string()))) as Box<dyn Iterator<Item = Event>>
-        }
+        v => Box::new(std::iter::once(Event::from(v.into_bytes())))
+            as Box<dyn Iterator<Item = Event>>,
     }
 }
 

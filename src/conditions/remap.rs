@@ -73,7 +73,7 @@ impl Remap {
         // program wants to mutate its events.
         //
         // see: https://github.com/timberio/vector/issues/4744
-        let mut target: VrlTarget = event.clone().into();
+        let mut target = VrlTarget::new(event.clone());
         Runtime::default().resolve(&mut target, &self.program)
     }
 }

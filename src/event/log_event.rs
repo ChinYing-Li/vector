@@ -170,10 +170,6 @@ impl LogEvent {
         }
         self.metadata.merge(incoming.metadata());
     }
-
-    pub fn take_fields(&mut self) -> BTreeMap<String, Value> {
-        std::mem::take(&mut self.fields)
-    }
 }
 
 impl EventDataEq for LogEvent {
