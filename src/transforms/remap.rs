@@ -133,7 +133,7 @@ mod tests {
         metric::{MetricKind, MetricValue},
         LogEvent, Metric, Value,
     };
-    use indoc::formatdoc;
+    use indoc::{formatdoc, indoc};
     use shared::btreemap;
     use std::collections::BTreeMap;
 
@@ -188,10 +188,9 @@ mod tests {
         let metadata = event.metadata().clone();
 
         let conf = RemapConfig {
-            source: r#"
-. = .events
-"#
-            .to_string(),
+            source: indoc! {r#"
+                . = .events
+            "#},
             drop_on_error: true,
             drop_on_abort: false,
         };
