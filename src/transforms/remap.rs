@@ -190,7 +190,8 @@ mod tests {
         let conf = RemapConfig {
             source: indoc! {r#"
                 . = .events
-            "#},
+            "#}
+            .to_owned(),
             drop_on_error: true,
             drop_on_abort: false,
         };
