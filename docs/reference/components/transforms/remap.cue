@@ -141,12 +141,12 @@ components: transforms: "remap": {
 		emitting_multiple_events: {
 			title: "Emitting multiple log events"
 			body: #"""
-			Multiple log events can be emitted from remap by assigning an array
-			to the root path `.`. One log event will be emitted for each input
-			element of the array.
+				Multiple log events can be emitted from remap by assigning an array
+				to the root path `.`. One log event will be emitted for each input
+				element of the array.
 
-			If any of the array elements is not an object, they will be set as
-			the `message` key for the corresponding emitted log event.
+				If any of the array elements is not an object, they will be set as
+				the `message` key for the corresponding emitted log event.
 				"""#
 		}
 	}
