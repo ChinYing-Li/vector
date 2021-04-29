@@ -1,16 +1,16 @@
 use crate::{
     config::{DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
-    event::proto as event,
     event::Event,
+    proto::vector as proto,
     sinks::util::{
         retries::RetryLogic, sink, BatchConfig, BatchSettings, BatchSink, EncodedLength,
-        TowerRequestConfig, VecBuffer,
+        ServiceBuilderExt, TowerRequestConfig, VecBuffer,
     },
     sinks::{Healthcheck, VectorSink},
 };
 use futures::{
     future::{self, BoxFuture},
-    stream, SinkExt, StreamExt, TryFutureExt,
+    stream, SinkExt, StreamExt,
 };
 use getset::Setters;
 use lazy_static::lazy_static;
@@ -18,19 +18,13 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use std::task::{Context, Poll};
-use tonic::{transport::Endpoint, IntoRequest};
+use tonic::{
+    transport::{Channel, Endpoint},
+    IntoRequest,
+};
 use tower::ServiceBuilder;
 
-// TODO: duplicated for sink/source, should move to util.
-mod proto {
-    use tonic::include_proto;
-    pub use vector_client::VectorClient as Client;
-
-    include_proto!("vector");
-}
-
-type Client = proto::Client<tonic::transport::Channel>;
-type Request = tonic::Request<proto::EventRequest>;
+type Client = proto::Client<Channel>;
 type Response = Result<tonic::Response<proto::EventAck>, tonic::Status>;
 
 #[derive(Deserialize, Serialize, Debug, Setters)]
@@ -40,7 +34,7 @@ pub struct VectorSinkConfig {
     #[serde(default)]
     pub batch: BatchConfig,
     #[serde(default)]
-    pub request: TowerRequestConfig<Option<usize>>,
+    pub request: TowerRequestConfig,
 }
 
 inventory::submit! {
@@ -62,7 +56,7 @@ fn default_config(address: &str) -> VectorSinkConfig {
 }
 
 lazy_static! {
-    static ref REQUEST_DEFAULTS: TowerRequestConfig<Option<usize>> = TowerRequestConfig {
+    static ref REQUEST_DEFAULTS: TowerRequestConfig = TowerRequestConfig {
         ..Default::default()
     };
 }
@@ -71,30 +65,25 @@ lazy_static! {
 #[typetag::serde(name = "vector_grpc")]
 impl SinkConfig for VectorSinkConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
-        let endpoint = Endpoint::from_shared(self.address.clone()).expect("TODO");
-        let channel = endpoint.connect_lazy().expect("TODO");
+        let endpoint = Endpoint::from_shared(self.address.clone())?;
+        let client = proto::Client::new(endpoint.connect_lazy()?);
+        let healthcheck = healthcheck(client.clone());
+
+        let request = self.request.unwrap_with(&REQUEST_DEFAULTS);
         let batch = BatchSettings::default()
             .bytes(1300)
             .events(1000)
             .timeout(1)
             .parse_config(self.batch)?;
-        let request = self.request.unwrap_with(&REQUEST_DEFAULTS);
 
-        let client = proto::Client::new(channel);
         let svc = ServiceBuilder::new()
-            .concurrency_limit(request.concurrency.unwrap())
-            // .retry(request.retry_policy(VectorGrpcRetryLogic))
-            // .rate_limit(request.rate_limit_num, request.rate_limit_duration)
-            // .timeout(request.timeout)
+            .settings(request, VectorGrpcRetryLogic)
             .service(client);
 
         let buffer = VecBuffer::new(batch.size);
         let sink = BatchSink::new(svc, buffer, batch.timeout, cx.acker())
-            .sink_map_err(|error| error!(message = "Fatal grpc sink error.", %error))
+            .sink_map_err(|error| error!(message = "Fatal Vector GRPC sink error.", %error))
             .with_flat_map(move |event| stream::iter(encode_event(event)).map(Ok));
-
-        // TODO
-        let healthcheck = async move { Ok(()) };
 
         Ok((VectorSink::Sink(Box::new(sink)), Box::pin(healthcheck)))
     }
@@ -108,40 +97,43 @@ impl SinkConfig for VectorSinkConfig {
     }
 }
 
-fn encode_event(event: Event) -> Option<Request> {
-    let request = proto::EventRequest {
-        message: Some(event.into()),
-    };
+/// Check to see if the remote service accepts new events.
+async fn healthcheck(mut client: Client) -> crate::Result<()> {
+    let request = client.health_check(proto::HealthCheckRequest {});
 
-    Some(request.into_request())
-}
+    if let Ok(response) = request.await {
+        let status = proto::ServingStatus::from_i32(response.into_inner().status);
 
-impl EncodedLength for Request {
-    fn encoded_length(&self) -> usize {
-        self.get_ref().encoded_len()
+        if let Some(proto::ServingStatus::Serving) = status {
+            return Ok(());
+        }
     }
+
+    Err(Box::new(Error::Health))
 }
 
-impl tower::Service<Vec<Request>> for Client {
+impl tower::Service<Vec<proto::EventRequest>> for Client {
     type Response = ();
-    type Error = String;
+    type Error = Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Readiness check of the client is done through the `push_events()`
+        // call happening inside `call()`. That check blocks until the client is
+        // ready to perform another request.
+        //
+        // See: <https://docs.rs/tonic/0.4.2/tonic/client/struct.Grpc.html#method.ready>
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, requests: Vec<Request>) -> Self::Future {
+    fn call(&mut self, requests: Vec<proto::EventRequest>) -> Self::Future {
         let mut futures = Vec::with_capacity(requests.len());
 
+        // TODO: Instead of firing off multiple requests, have the server accept
+        // more than one event per request (i.e. bulk endpoint).
         for request in requests {
             let mut client = self.clone();
-            futures.push(async move {
-                client
-                    .push_events(request)
-                    .map_err(|err| err.to_string())
-                    .await
-            })
+            futures.push(async move { client.push_events(request.into_request()).await })
         }
 
         Box::pin(async move {
@@ -150,10 +142,22 @@ impl tower::Service<Vec<Request>> for Client {
                 .into_iter()
                 .map(|v| match v {
                     Ok(..) => Ok(()),
-                    Err(e) => Err(e.to_string()),
+                    Err(err) => Err(Error::Request { source: err }),
                 })
                 .collect::<Result<_, _>>()
         })
+    }
+}
+
+fn encode_event(event: Event) -> Option<proto::EventRequest> {
+    Some(proto::EventRequest {
+        message: Some(event.into()),
+    })
+}
+
+impl EncodedLength for proto::EventRequest {
+    fn encoded_length(&self) -> usize {
+        self.encoded_len()
     }
 }
 
@@ -164,7 +168,13 @@ impl sink::Response for Response {
 }
 
 #[derive(Debug, Snafu)]
-pub enum Error {}
+pub enum Error {
+    #[snafu(display("Request failed: {}", source))]
+    Request { source: tonic::Status },
+
+    #[snafu(display("Vector source unhealthy"))]
+    Health,
+}
 
 #[derive(Debug, Clone)]
 struct VectorGrpcRetryLogic;
@@ -173,8 +183,8 @@ impl RetryLogic for VectorGrpcRetryLogic {
     type Error = Error;
     type Response = ();
 
+    // TODO: For now, all requests are retryable.
     fn is_retriable_error(&self, _: &Self::Error) -> bool {
-        // TODO
         true
     }
 }

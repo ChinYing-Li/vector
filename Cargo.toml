@@ -251,7 +251,6 @@ lucet-runtime = { git = "https://github.com/bytecodealliance/lucet.git", rev = "
 lucet-wasi = { git = "https://github.com/bytecodealliance/lucet.git", rev = "b1863dacc8c92c11e5434fc8815d9b9a26cfe3db", optional = true }
 lucetc = { git = "https://github.com/bytecodealliance/lucet.git", rev = "b1863dacc8c92c11e5434fc8815d9b9a26cfe3db", optional = true }
 vector-wasm = { path = "lib/vector-wasm", optional = true }
-# tonic-health = "0.3.0"
 
 [target.'cfg(windows)'.dependencies]
 schannel = "0.1.19"

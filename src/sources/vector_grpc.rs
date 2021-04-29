@@ -1,8 +1,8 @@
 use crate::{
     config::SourceContext,
-    config::{DataType, GenerateConfig, GlobalOptions, Resource, SourceConfig, SourceDescription},
-    event::proto as event,
+    config::{DataType, GenerateConfig, Resource, SourceConfig, SourceDescription},
     event::Event,
+    proto::vector as proto,
     shutdown::{ShutdownSignal, ShutdownSignalToken},
     sources::Source,
     tls::TlsConfig,
@@ -13,48 +13,76 @@ use futures::{FutureExt, SinkExt, TryFutureExt};
 use getset::Setters;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tonic::{transport::Server, Request, Response, Status};
-
-// TODO: duplicated for sink/source, should move to util.
-mod proto {
-    pub use vector_server::{Vector, VectorServer as Server};
-
-    tonic::include_proto!("vector");
-}
 
 #[derive(Debug, Clone)]
 pub struct Service {
     pipeline: Pipeline,
+    healthy: Arc<AtomicBool>,
+}
+
+impl Service {
+    // TODO: might not need this if there's no way to determine internal Vector
+    // health status (or if we don't care about it in this source).
+    #[allow(dead_code)]
+    fn set_healthy(&self, healthy: bool) {
+        loop {
+            match self.healthy.compare_exchange_weak(
+                !healthy,
+                healthy,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(_) => std::hint::spin_loop(),
+            }
+        }
+    }
 }
 
 #[tonic::async_trait]
-impl proto::Vector for Service {
+impl proto::Service for Service {
     async fn push_events(
         &self,
         request: Request<proto::EventRequest>,
     ) -> Result<Response<proto::EventAck>, Status> {
-        let event: Event = match request.into_inner().message {
-            None => panic!("TODO"),
-            Some(wrapper) => wrapper.into(),
-        };
+        let event = request
+            .into_inner()
+            .message
+            .map(Event::from)
+            .ok_or(Status::invalid_argument("missing event"))?;
 
-        let result = self.pipeline.clone().send(event).await;
+        let response = Response::new(proto::EventAck {
+            // TODO: There is no need for any body in the ack.
+            message: "success".to_owned(),
+        });
 
-        match result {
-            Ok(..) => Ok(Response::new(proto::EventAck {
-                message: "success".to_owned(),
-            })),
-            Err(err) => Err(Status::unavailable(err.to_string())),
-        }
+        self.pipeline
+            .clone()
+            .send(event)
+            .await
+            .map(|_| response)
+            .map_err(|err| Status::unavailable(err.to_string()))
     }
 
+    // TODO: figure out a way to determine if the current Vector instance is "healthy".
     async fn health_check(
         &self,
         _: Request<proto::HealthCheckRequest>,
     ) -> Result<Response<proto::HealthCheckResponse>, Status> {
-        Ok(Response::new(proto::HealthCheckResponse {
-            status: proto::ServingStatus::Serving.into(),
-        }))
+        let status = if self.healthy.load(Ordering::Relaxed) {
+            proto::ServingStatus::Serving
+        } else {
+            proto::ServingStatus::NotServing
+        };
+
+        let message = proto::HealthCheckResponse {
+            status: status.into(),
+        };
+
+        Ok(Response::new(message))
     }
 }
 
@@ -116,15 +144,15 @@ impl SourceConfig for Config {
 async fn run(address: SocketAddr, out: Pipeline, shutdown: ShutdownSignal) -> crate::Result<()> {
     let _span = crate::trace::current_span();
 
-    // let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
-    // health_reporter
-    //     .set_serving::<GreeterServer<MyGreeter>>()
-    //     .await;
-    let service = proto::Server::new(Service { pipeline: out });
+    let healthy = Arc::new(AtomicBool::new(true));
+    let service = proto::Server::new(Service {
+        pipeline: out,
+        healthy,
+    });
 
     let (tx, rx) = tokio::sync::oneshot::channel::<ShutdownSignalToken>();
+
     Server::builder()
-        // .add_service(health_service)
         .add_service(service)
         .serve_with_shutdown(address, shutdown.map(|token| tx.send(token).unwrap()))
         .await?;
@@ -133,10 +161,3 @@ async fn run(address: SocketAddr, out: Pipeline, shutdown: ShutdownSignal) -> cr
 
     Ok(())
 }
-
-// fn build_event(body: Bytes) -> Option<Event> {
-//     match event::EventWrapper::decode(body).map(Event::from) {
-//         Ok(event) => Some(event),
-//         Err(..) => None,
-//     }
-// }
