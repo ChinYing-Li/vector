@@ -1,4 +1,5 @@
-use super::{Event, Metric, MetricKind, Value};
+use super::{Event, EventMetadata, LogEvent, Metric, MetricKind, Value};
+use crate::config::log_schema;
 use snafu::Snafu;
 use std::{collections::BTreeMap, convert::TryFrom, iter::FromIterator};
 use vrl::path::Segment;
@@ -11,7 +12,7 @@ const VALID_METRIC_PATHS_GET: &str = ".name, .namespace, .timestamp, .kind, .tag
 /// An adapter to turn `Event`s into `vr::Target`s
 #[derive(Debug, Clone)]
 pub enum VrlTarget {
-    LogEvent(vrl::Value),
+    LogEvent(vrl::Value, EventMetadata),
     Metric(Metric),
 }
 
@@ -19,9 +20,10 @@ impl VrlTarget {
     pub fn new(event: Event) -> Self {
         match event {
             Event::Log(event) => {
+                let metadata = event.metadata().to_owned();
                 let fields: BTreeMap<String, Value> = event.into();
                 let value: Value = fields.into();
-                VrlTarget::LogEvent(value.into())
+                VrlTarget::LogEvent(value.into(), metadata)
             }
             Event::Metric(event) => VrlTarget::Metric(event),
         }
@@ -33,8 +35,9 @@ impl VrlTarget {
     /// to an array in VRL
     pub fn into_events(self) -> impl Iterator<Item = Event> {
         match self {
-            VrlTarget::LogEvent(value) => {
-                Box::new(value_into_events(value.into())) as Box<dyn Iterator<Item = Event>>
+            VrlTarget::LogEvent(value, metadata) => {
+                Box::new(value_into_events(value.into(), metadata))
+                    as Box<dyn Iterator<Item = Event>>
             }
             VrlTarget::Metric(metric) => {
                 Box::new(std::iter::once(Event::Metric(metric))) as Box<dyn Iterator<Item = Event>>
@@ -46,7 +49,7 @@ impl VrlTarget {
 impl vrl::Target for VrlTarget {
     fn insert(&mut self, path: &vrl::Path, value: vrl::Value) -> std::result::Result<(), String> {
         match self {
-            VrlTarget::LogEvent(ref mut log) => log.insert(path, value),
+            VrlTarget::LogEvent(ref mut log, _) => log.insert(path, value),
             VrlTarget::Metric(ref mut metric) => {
                 if path.is_root() {
                     return Err(MetricPathError::SetPathError.to_string());
@@ -106,7 +109,7 @@ impl vrl::Target for VrlTarget {
 
     fn get(&self, path: &vrl::Path) -> std::result::Result<Option<vrl::Value>, String> {
         match self {
-            VrlTarget::LogEvent(log) => log.get(path),
+            VrlTarget::LogEvent(log, _) => log.get(path),
             VrlTarget::Metric(metric) => {
                 if path.is_root() {
                     let mut map = BTreeMap::<String, vrl::Value>::new();
@@ -173,7 +176,7 @@ impl vrl::Target for VrlTarget {
         compact: bool,
     ) -> std::result::Result<Option<vrl::Value>, String> {
         match self {
-            VrlTarget::LogEvent(ref mut log) => log.remove(path, compact),
+            VrlTarget::LogEvent(ref mut log, _) => log.remove(path, compact),
             VrlTarget::Metric(ref mut metric) => {
                 if path.is_root() {
                     return Err(MetricPathError::SetPathError.to_string());
@@ -212,18 +215,23 @@ impl From<Event> for VrlTarget {
     }
 }
 
-fn value_into_events(value: Value) -> impl Iterator<Item = Event> {
+fn value_into_events(value: Value, metadata: EventMetadata) -> impl Iterator<Item = Event> {
     match value {
-        Value::Array(values) => Box::new(values.into_iter().map(value_into_events).flatten())
-            as Box<dyn Iterator<Item = Event>>,
+        Value::Array(values) => Box::new(values.into_iter().map(move |v| {
+            let mut log = LogEvent::new_with_metadata(metadata.clone());
+            log.insert(log_schema().message_key(), v);
+            Event::from(log)
+        })) as Box<dyn Iterator<Item = Event>>,
         Value::Map(object) => {
-            Box::new(std::iter::once(Event::from(object))) as Box<dyn Iterator<Item = Event>>
+            let mut log = LogEvent::new_with_metadata(metadata);
+            log.extend(object);
+            Box::new(std::iter::once(Event::from(log))) as Box<dyn Iterator<Item = Event>>
         }
-        Value::Bytes(bytes) => {
-            Box::new(std::iter::once(Event::from(bytes))) as Box<dyn Iterator<Item = Event>>
+        v => {
+            let mut log = LogEvent::new_with_metadata(metadata);
+            log.insert(log_schema().message_key(), v);
+            Box::new(std::iter::once(Event::from(log))) as Box<dyn Iterator<Item = Event>>
         }
-        v => Box::new(std::iter::once(Event::from(v.into_bytes())))
-            as Box<dyn Iterator<Item = Event>>,
     }
 }
 
