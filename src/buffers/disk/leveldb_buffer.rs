@@ -230,7 +230,7 @@ impl Drop for Writer {
 /// Unread -> Read -> Deleted -> Compacted
 ///
 /// So the disk buffer (indices/keys) is separated into following regions.
-/// |--Compacted--|--Deleted--|--Read--|--Unread--
+/// |--Compacted--|--Deleted--|--Read--|--Unread
 ///  ^             ^           ^        ^
 ///  |             |           |        |
 ///  0  compacted_offset       |        |
