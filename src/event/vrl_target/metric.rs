@@ -1,5 +1,4 @@
-use super::{Event, EventMetadata, LogEvent, Metric, MetricKind, Value};
-use crate::config::log_schema;
+use super::super::{Metric, MetricKind};
 use lookup::LookupBuf;
 use snafu::Snafu;
 use std::{collections::BTreeMap, convert::TryFrom, iter::FromIterator};
@@ -14,48 +13,24 @@ const VALID_METRIC_PATHS_GET: &str = ".name, .namespace, .timestamp, .kind, .tag
 /// fields such as `.tags.host.thing`.
 const MAX_METRIC_PATH_DEPTH: usize = 3;
 
-/// An adapter to turn `Event`s into `vrl::Target`s.
+#[derive(Debug, Snafu)]
+enum MetricPathError<'a> {
+    #[snafu(display("cannot set root path"))]
+    SetPathError,
+
+    #[snafu(display("invalid path {}: expected one of {}", path, expected))]
+    InvalidPath { path: &'a str, expected: &'a str },
+}
+
 #[derive(Debug, Clone)]
-pub enum VrlTarget {
-    LogEvent(vrl::Value, EventMetadata),
-    Metric(Metric),
+pub enum Target {
+    Event(Metric),
 }
 
-impl VrlTarget {
-    pub fn new(event: Event) -> Self {
-        match event {
-            Event::Log(event) => {
-                let metadata = event.metadata().to_owned();
-                let fields: BTreeMap<String, Value> = event.into();
-                let value: Value = fields.into();
-                VrlTarget::LogEvent(value.into(), metadata)
-            }
-            Event::Metric(event) => VrlTarget::Metric(event),
-        }
-    }
-
-    /// Turn the target back into events.
-    ///
-    /// This returns an iterator of events as one event can be turned into multiple by assigning an
-    /// array to `.` in VRL.
-    pub fn into_events(self) -> impl Iterator<Item = Event> {
-        match self {
-            VrlTarget::LogEvent(value, metadata) => {
-                Box::new(value_into_events(value.into(), metadata))
-                    as Box<dyn Iterator<Item = Event>>
-            }
-            VrlTarget::Metric(metric) => {
-                Box::new(std::iter::once(Event::Metric(metric))) as Box<dyn Iterator<Item = Event>>
-            }
-        }
-    }
-}
-
-impl vrl::Target for VrlTarget {
+impl vrl::Target for Target {
     fn insert(&mut self, path: &LookupBuf, value: vrl::Value) -> Result<(), String> {
         match self {
-            VrlTarget::LogEvent(ref mut log, _) => log.insert(path, value),
-            VrlTarget::Metric(ref mut metric) => {
+            Target::Event(ref mut metric) => {
                 if path.is_root() {
                     return Err(MetricPathError::SetPathError.to_string());
                 }
@@ -124,8 +99,7 @@ impl vrl::Target for VrlTarget {
 
     fn get(&self, path: &LookupBuf) -> Result<Option<vrl::Value>, String> {
         match self {
-            VrlTarget::LogEvent(log, _) => log.get(path),
-            VrlTarget::Metric(metric) => {
+            Target::Event(metric) => {
                 if path.is_root() {
                     let mut map = BTreeMap::<String, vrl::Value>::new();
                     map.insert("name".to_string(), metric.series.name.name.clone().into());
@@ -191,10 +165,9 @@ impl vrl::Target for VrlTarget {
         }
     }
 
-    fn remove(&mut self, path: &LookupBuf, compact: bool) -> Result<Option<vrl::Value>, String> {
+    fn remove(&mut self, path: &LookupBuf, _compact: bool) -> Result<Option<vrl::Value>, String> {
         match self {
-            VrlTarget::LogEvent(ref mut log, _) => log.remove(path, compact),
-            VrlTarget::Metric(ref mut metric) => {
+            Target::Event(ref mut metric) => {
                 if path.is_root() {
                     return Err(MetricPathError::SetPathError.to_string());
                 }
@@ -228,49 +201,14 @@ impl vrl::Target for VrlTarget {
     }
 }
 
-impl From<Event> for VrlTarget {
-    fn from(event: Event) -> Self {
-        VrlTarget::new(event)
-    }
-}
-
-fn value_into_events(value: Value, metadata: EventMetadata) -> impl Iterator<Item = Event> {
-    match value {
-        Value::Array(values) => Box::new(values.into_iter().map(move |v| {
-            let mut log = LogEvent::new_with_metadata(metadata.clone());
-            log.insert(log_schema().message_key(), v);
-            Event::from(log)
-        })) as Box<dyn Iterator<Item = Event>>,
-        Value::Map(object) => {
-            let mut log = LogEvent::new_with_metadata(metadata);
-            log.extend(object);
-            Box::new(std::iter::once(Event::from(log))) as Box<dyn Iterator<Item = Event>>
-        }
-        v => {
-            let mut log = LogEvent::new_with_metadata(metadata);
-            log.insert(log_schema().message_key(), v);
-            Box::new(std::iter::once(Event::from(log))) as Box<dyn Iterator<Item = Event>>
-        }
-    }
-}
-
-#[derive(Debug, Snafu)]
-enum MetricPathError<'a> {
-    #[snafu(display("cannot set root path"))]
-    SetPathError,
-
-    #[snafu(display("invalid path {}: expected one of {}", path, expected))]
-    InvalidPath { path: &'a str, expected: &'a str },
-}
-
 #[cfg(test)]
 mod test {
-    use super::super::{metric::MetricTags, MetricValue};
+    use super::super::super::{metric::MetricTags, MetricValue};
     use super::*;
     use chrono::{offset::TimeZone, Utc};
     use pretty_assertions::assert_eq;
     use shared::btreemap;
-    use vrl::{Target, Value};
+    use vrl::{Target as _, Value};
 
     #[test]
     fn metric_all_fields() {
@@ -287,7 +225,7 @@ mod test {
         }))
         .with_timestamp(Some(Utc.ymd(2020, 12, 10).and_hms(12, 0, 0)));
 
-        let target = VrlTarget::new(Event::Metric(metric));
+        let target = Target::Event(metric);
 
         assert_eq!(
             Ok(Some(
@@ -341,7 +279,7 @@ mod test {
             ("tags.thing", None, "footag".into(), true),
         ];
 
-        let mut target = VrlTarget::new(Event::Metric(metric));
+        let mut target = Target::Event(metric);
 
         for (path, current, new, delete) in cases {
             let path = LookupBuf::from_str(path).unwrap();
@@ -376,7 +314,7 @@ mod test {
 
         let validpaths_set = vec![".name", ".namespace", ".timestamp", ".kind", ".tags"];
 
-        let mut target = VrlTarget::new(Event::Metric(metric));
+        let mut target = Target::Event(metric);
 
         assert_eq!(
             Err(format!(
