@@ -243,7 +243,7 @@ uuid = { version = "0.8.2", default-features = false, features = ["serde", "v4"]
 warp = { version = "0.3.1", default-features = false, optional = true }
 zstd = { version = "0.6", default-features = false }
 cfg-if = { version = "1.0.0", default-features = false }
-tonic = { version = "0.4", optional = true }
+tonic = { version = "0.4", optional = true, features = ["tls"] }
 
 # For WASM
 async-stream = "0.3.1"

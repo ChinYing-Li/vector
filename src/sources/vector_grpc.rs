@@ -13,33 +13,11 @@ use futures::{FutureExt, SinkExt, TryFutureExt};
 use getset::Setters;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tonic::{transport::Server, Request, Response, Status};
 
 #[derive(Debug, Clone)]
 pub struct Service {
     pipeline: Pipeline,
-    healthy: Arc<AtomicBool>,
-}
-
-impl Service {
-    // TODO: might not need this if there's no way to determine internal Vector
-    // health status (or if we don't care about it in this source).
-    #[allow(dead_code)]
-    fn set_healthy(&self, healthy: bool) {
-        loop {
-            match self.healthy.compare_exchange_weak(
-                !healthy,
-                healthy,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(_) => std::hint::spin_loop(),
-            }
-        }
-    }
 }
 
 #[tonic::async_trait]
@@ -72,14 +50,8 @@ impl proto::Service for Service {
         &self,
         _: Request<proto::HealthCheckRequest>,
     ) -> Result<Response<proto::HealthCheckResponse>, Status> {
-        let status = if self.healthy.load(Ordering::Relaxed) {
-            proto::ServingStatus::Serving
-        } else {
-            proto::ServingStatus::NotServing
-        };
-
         let message = proto::HealthCheckResponse {
-            status: status.into(),
+            status: proto::ServingStatus::Serving.into(),
         };
 
         Ok(Response::new(message))
@@ -144,12 +116,7 @@ impl SourceConfig for Config {
 async fn run(address: SocketAddr, out: Pipeline, shutdown: ShutdownSignal) -> crate::Result<()> {
     let _span = crate::trace::current_span();
 
-    let healthy = Arc::new(AtomicBool::new(true));
-    let service = proto::Server::new(Service {
-        pipeline: out,
-        healthy,
-    });
-
+    let service = proto::Server::new(Service { pipeline: out });
     let (tx, rx) = tokio::sync::oneshot::channel::<ShutdownSignalToken>();
 
     Server::builder()

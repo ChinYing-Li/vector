@@ -12,14 +12,15 @@ use futures::{
     future::{self, BoxFuture},
     stream, SinkExt, StreamExt,
 };
-use getset::Setters;
+use http::uri::Uri;
 use lazy_static::lazy_static;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
+use std::path::PathBuf;
 use std::task::{Context, Poll};
 use tonic::{
-    transport::{Channel, Endpoint},
+    transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity},
     IntoRequest,
 };
 use tower::ServiceBuilder;
@@ -27,7 +28,7 @@ use tower::ServiceBuilder;
 type Client = proto::Client<Channel>;
 type Response = Result<tonic::Response<proto::EventAck>, tonic::Status>;
 
-#[derive(Deserialize, Serialize, Debug, Setters)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct VectorSinkConfig {
     address: String,
@@ -35,6 +36,16 @@ pub struct VectorSinkConfig {
     pub batch: BatchConfig,
     #[serde(default)]
     pub request: TowerRequestConfig,
+    #[serde(default)]
+    pub tls: Option<GrpcTlsConfig>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcTlsConfig {
+    ca_file: PathBuf,
+    crt_file: PathBuf,
+    key_file: PathBuf,
 }
 
 inventory::submit! {
@@ -52,6 +63,7 @@ fn default_config(address: &str) -> VectorSinkConfig {
         address: address.to_owned(),
         batch: BatchConfig::default(),
         request: TowerRequestConfig::default(),
+        tls: None,
     }
 }
 
@@ -66,6 +78,24 @@ lazy_static! {
 impl SinkConfig for VectorSinkConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let endpoint = Endpoint::from_shared(self.address.clone())?;
+        let endpoint = match &self.tls {
+            Some(tls) => {
+                let host = get_authority(&self.address)?;
+                let ca = Certificate::from_pem(tokio::fs::read(&tls.ca_file).await?);
+                let crt = tokio::fs::read(&tls.crt_file).await?;
+                let key = tokio::fs::read(&tls.key_file).await?;
+                let identity = Identity::from_pem(crt, key);
+
+                let tls_config = ClientTlsConfig::new()
+                    .identity(identity)
+                    .ca_certificate(ca)
+                    .domain_name(host);
+
+                endpoint.tls_config(tls_config)?
+            }
+            None => endpoint,
+        };
+
         let client = proto::Client::new(endpoint.connect_lazy()?);
         let healthcheck = healthcheck(client.clone());
 
@@ -110,6 +140,13 @@ async fn healthcheck(mut client: Client) -> crate::Result<()> {
     }
 
     Err(Box::new(Error::Health))
+}
+
+fn get_authority(url: &str) -> Result<String, Error> {
+    url.parse::<Uri>()
+        .ok()
+        .and_then(|uri| uri.authority().map(ToString::to_string))
+        .ok_or(Error::NoHost)
 }
 
 impl tower::Service<Vec<proto::EventRequest>> for Client {
@@ -174,6 +211,9 @@ pub enum Error {
 
     #[snafu(display("Vector source unhealthy"))]
     Health,
+
+    #[snafu(display("URL has no host."))]
+    NoHost,
 }
 
 #[derive(Debug, Clone)]
@@ -183,8 +223,13 @@ impl RetryLogic for VectorGrpcRetryLogic {
     type Error = Error;
     type Response = ();
 
-    // TODO: For now, all requests are retryable.
-    fn is_retriable_error(&self, _: &Self::Error) -> bool {
+    fn is_retriable_error(&self, err: &Self::Error) -> bool {
+        if let Error::Request { source } = err {
+            if let tonic::Code::Unknown = source.code() {
+                return false;
+            }
+        }
+
         true
     }
 }
