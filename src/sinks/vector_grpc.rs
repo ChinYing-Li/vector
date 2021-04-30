@@ -40,6 +40,7 @@ pub struct VectorSinkConfig {
     pub tls: Option<GrpcTlsConfig>,
 }
 
+// TODO: duplicated in source
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcTlsConfig {
