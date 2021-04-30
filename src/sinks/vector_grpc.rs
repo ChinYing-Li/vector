@@ -1,5 +1,7 @@
 use crate::{
-    config::{DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription},
+    config::{
+        DataType, GenerateConfig, SinkConfig, SinkContext, SinkDescription, SinkHealthcheckOptions,
+    },
     event::Event,
     proto::vector as proto,
     sinks::util::{
@@ -98,7 +100,7 @@ impl SinkConfig for VectorSinkConfig {
         };
 
         let client = proto::Client::new(endpoint.connect_lazy()?);
-        let healthcheck = healthcheck(client.clone());
+        let healthcheck = healthcheck(client.clone(), cx.healthcheck.clone());
 
         let request = self.request.unwrap_with(&REQUEST_DEFAULTS);
         let batch = BatchSettings::default()
@@ -129,7 +131,12 @@ impl SinkConfig for VectorSinkConfig {
 }
 
 /// Check to see if the remote service accepts new events.
-async fn healthcheck(mut client: Client) -> crate::Result<()> {
+async fn healthcheck(mut client: Client, options: SinkHealthcheckOptions) -> crate::Result<()> {
+    // TODO: if enabled, allow changing the endpoint through `options.uri`.
+    if !options.enabled {
+        return Ok(());
+    }
+
     let request = client.health_check(proto::HealthCheckRequest {});
 
     if let Ok(response) = request.await {

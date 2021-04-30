@@ -90,7 +90,7 @@ inventory::submit! {
 impl GenerateConfig for Config {
     fn generate_config() -> toml::Value {
         toml::Value::try_from(Self {
-            address: "0.0.0.0:80".parse().unwrap(),
+            address: "0.0.0.0:6000".parse().unwrap(),
             shutdown_timeout_secs: default_shutdown_timeout_secs(),
             tls: None,
         })
